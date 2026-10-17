@@ -21,7 +21,7 @@ public class ArenaGame : ModuleRules
 			"Slate"
 		});
 
-		PrivateDependencyModuleNames.AddRange(new string[] { });
+		PrivateDependencyModuleNames.AddRange(new string[] { "SlateCore", "MediaAssets", "AudioMixer" });
 
 		PublicIncludePaths.AddRange(new string[] {
 			"ArenaGame",

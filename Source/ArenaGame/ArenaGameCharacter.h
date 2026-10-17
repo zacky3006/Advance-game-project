@@ -13,6 +13,7 @@ class UCameraComponent;
 class UInputAction;
 class UHealthComponent;
 class USphereComponent;
+class ULootCollectorComponent;
 
 struct FInputActionValue;
 
@@ -46,6 +47,16 @@ protected:
         meta = (AllowPrivateAccess = "true")
     )
     UCameraComponent* FollowCamera;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Camera")
+    TObjectPtr<UCameraComponent> FirstPersonCamera;
+
+    UPROPERTY(BlueprintReadOnly, Transient, Category="Camera")
+    bool bIsFirstPerson = false;
+
+    bool bSavedOrientRotationToMovement = true;
+    bool bSavedUseControllerRotationYaw = false;
+    bool bSavedMeshOwnerNoSee = false;
 
     UPROPERTY(
         VisibleAnywhere,
@@ -275,6 +286,13 @@ public:
     // =====================================================
 
     AArenaGameCharacter();
+
+    /** Local camera toggle; also available to Blueprint UI buttons. */
+    UFUNCTION(BlueprintCallable, Category="Camera")
+    void ToggleCameraPerspective();
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Loot")
+    TObjectPtr<ULootCollectorComponent> LootCollector;
 
 
     // =====================================================

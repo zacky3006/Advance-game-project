@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ArenaGameCharacter.h"
+#include "LootCollectorComponent.h"
+#include "InputCoreTypes.h"
 
 
 // =====================================================
@@ -10,6 +12,7 @@
 #include "Engine/LocalPlayer.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "GameFramework/Controller.h"
@@ -68,6 +71,7 @@ AArenaGameCharacter::AArenaGameCharacter()
     // -------------------------------------------------
 
     PrimaryActorTick.bCanEverTick = true;
+    LootCollector = CreateDefaultSubobject<ULootCollectorComponent>(TEXT("LootCollector"));
 
 
     // -------------------------------------------------
@@ -146,6 +150,12 @@ AArenaGameCharacter::AArenaGameCharacter()
 
     FollowCamera->bUsePawnControlRotation = false;
 
+    FirstPersonCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("FirstPersonCamera"));
+    FirstPersonCamera->SetupAttachment(RootComponent);
+    FirstPersonCamera->SetRelativeLocation(FVector(0.f, 0.f, BaseEyeHeight));
+    FirstPersonCamera->bUsePawnControlRotation = true;
+    FirstPersonCamera->SetAutoActivate(false);
+
 
     // -------------------------------------------------
     // Health Component
@@ -193,6 +203,39 @@ AArenaGameCharacter::AArenaGameCharacter()
 }
 
 
+void AArenaGameCharacter::ToggleCameraPerspective()
+{
+    if (LootCollector && LootCollector->IsInventoryOpen()) return;
+    if (!IsLocallyControlled() || !IsPlayerControlled())
+    {
+        return;
+    }
+
+    if (!bIsFirstPerson)
+    {
+        bSavedOrientRotationToMovement = GetCharacterMovement()->bOrientRotationToMovement;
+        bSavedUseControllerRotationYaw = bUseControllerRotationYaw;
+        bSavedMeshOwnerNoSee = GetMesh()->bOwnerNoSee;
+        bIsFirstPerson = true;
+        FirstPersonCamera->SetRelativeLocation(FVector(0.f, 0.f, BaseEyeHeight));
+        FollowCamera->Deactivate();
+        FirstPersonCamera->Activate();
+        GetCharacterMovement()->bOrientRotationToMovement = false;
+        bUseControllerRotationYaw = true;
+        // Hide the full-body mesh only for its owner to keep the face out of view.
+        GetMesh()->SetOwnerNoSee(true);
+    }
+    else
+    {
+        bIsFirstPerson = false;
+        FirstPersonCamera->Deactivate();
+        FollowCamera->Activate();
+        GetCharacterMovement()->bOrientRotationToMovement = bSavedOrientRotationToMovement;
+        bUseControllerRotationYaw = bSavedUseControllerRotationYaw;
+        GetMesh()->SetOwnerNoSee(bSavedMeshOwnerNoSee);
+    }
+}
+
 // =====================================================
 // Replication
 // =====================================================
@@ -228,6 +271,12 @@ void AArenaGameCharacter::Tick(
     Super::Tick(
         DeltaSeconds
     );
+
+    if (bIsFirstPerson && IsLocallyControlled())
+    {
+        // BaseEyeHeight follows the character's standing/crouching state.
+        FirstPersonCamera->SetRelativeLocation(FVector(0.f, 0.f, BaseEyeHeight));
+    }
 
 
     // -------------------------------------------------
@@ -347,6 +396,11 @@ void AArenaGameCharacter::SetupPlayerInputComponent(
         PlayerInputComponent
     );
 
+
+    PlayerInputComponent->BindKey(EKeys::F, IE_Pressed, LootCollector.Get(), &ULootCollectorComponent::TryInteract);
+    PlayerInputComponent->BindKey(EKeys::E, IE_Pressed, LootCollector.Get(), &ULootCollectorComponent::TryEscape);
+    PlayerInputComponent->BindKey(EKeys::C, IE_Pressed, this, &AArenaGameCharacter::ToggleCameraPerspective);
+    PlayerInputComponent->BindKey(EKeys::Tab, IE_Pressed, LootCollector.Get(), &ULootCollectorComponent::ToggleInventory);
 
     UEnhancedInputComponent* EnhancedInputComponent =
         Cast<UEnhancedInputComponent>(
