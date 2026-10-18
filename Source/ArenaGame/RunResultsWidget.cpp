@@ -16,6 +16,9 @@
 #include "Styling/CoreStyle.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
+#include "ArenaGamePlayerController.h"
+#include "ArenaGameState.h"
+#include "Engine/World.h"
 
 namespace RunResultsUI
 {
@@ -72,6 +75,11 @@ void URunResultsWidget::NativeOnInitialized()
     Content->AddChildToVerticalBox(Text(WidgetTree, NSLOCTEXT("Results", "Complete", "ESCAPE SUCCESSFUL"), 13, LootUITheme::Success));
     Content->AddChildToVerticalBox(Text(WidgetTree, NSLOCTEXT("Results", "Title", "RUN SUMMARY"), 34, LootUITheme::Gold))
         ->SetPadding(FMargin(0.f, 6.f, 0.f, 22.f));
+
+    if (const AArenaGameState* Team = GetWorld()->GetGameState<AArenaGameState>())
+        Content->AddChildToVerticalBox(Text(WidgetTree, FText::FromString(FString::Printf(
+            TEXT("ESCAPED %d   /   DEAD %d"), Team->EscapedPlayers.Num(), Team->DeadPlayers.Num())), 18, LootUITheme::Muted))
+            ->SetPadding(FMargin(0.f, 0.f, 0.f, 18.f));
 
     UHorizontalBox* Stats = WidgetTree->ConstructWidget<UHorizontalBox>();
     Content->AddChildToVerticalBox(Stats)->SetPadding(FMargin(0.f, 0.f, 0.f, 26.f));
@@ -195,6 +203,10 @@ void URunResultsWidget::NativeTick(const FGeometry& Geometry, float DeltaTime)
     Super::NativeTick(Geometry, DeltaTime);
     IntroElapsed += DeltaTime;
     SetRenderOpacity(FMath::Clamp(IntroElapsed / 0.35f, 0.f, 1.f));
+    if (bLeaving)
+        if (const AArenaGameState* Team = GetWorld()->GetGameState<AArenaGameState>())
+            if (UTextBlock* Label = Cast<UTextBlock>(FinishButton->GetContent()))
+                Label->SetText(FText::FromString(FString::Printf(TEXT("WAITING %d/%d"), Team->ResultsReady, Team->TeamSize)));
 }
 
 void URunResultsWidget::FinishClicked()
@@ -202,5 +214,10 @@ void URunResultsWidget::FinishClicked()
     if (bLeaving) return;
     bLeaving = true;
     FinishButton->SetIsEnabled(false);
+    if (AArenaGamePlayerController* PC = Cast<AArenaGamePlayerController>(GetOwningPlayer()))
+    {
+        PC->ServerConfirmResults();
+        return;
+    }
     UGameplayStatics::OpenLevel(this, TEXT("/Game/Maps/MainMenu"), true);
 }

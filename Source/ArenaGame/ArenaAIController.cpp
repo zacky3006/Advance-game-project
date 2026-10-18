@@ -1,6 +1,8 @@
 #include "ArenaAIController.h"
 
 #include "ArenaGamePlayerController.h"
+#include "ArenaGameCharacter.h"
+#include "LootCollectorComponent.h"
 
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AIPerceptionSystem.h"
@@ -51,7 +53,7 @@ AArenaAIController::AArenaAIController()
 
     SightConfig->SightRadius = 1200.f;
     SightConfig->LoseSightRadius = 1500.f;
-    SightConfig->PeripheralVisionAngleDegrees = 30.f;
+    SightConfig->PeripheralVisionAngleDegrees = 80.f;
 
     SightConfig->DetectionByAffiliation.bDetectEnemies = true;
     SightConfig->DetectionByAffiliation.bDetectNeutrals = false;
@@ -180,6 +182,9 @@ void AArenaAIController::OnPossess(APawn* InPawn)
             ControlledCharacter->GetCharacterMovement())
         {
             Movement->MaxWalkSpeed = 250.f;
+            Movement->bOrientRotationToMovement = false;
+            Movement->bUseControllerDesiredRotation = true;
+            ControlledCharacter->bUseControllerRotationYaw = false;
         }
     }
 
@@ -329,42 +334,80 @@ void AArenaAIController::UpdateAlert(float DeltaTime)
     UBlackboardComponent* BB = GetBlackboardComponent();
 
     // Update alert separately for every player.
+    TSet<AActor*> NearbyPlayers;
+    if (const APawn* Guard = GetPawn(); Guard && NearbyMovementDetectionDistance > 0.f)
+    {
+        for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+        {
+            AArenaGameCharacter* Player = It->IsValid() ? Cast<AArenaGameCharacter>(It->Get()->GetPawn()) : nullptr;
+            if (!IsValid(Player) || Player == Guard || Player->bIsCrouched) continue;
+            const ULootCollectorComponent* Loot = Player->FindComponentByClass<ULootCollectorComponent>();
+            if (Loot && Loot->HasEscaped()) continue;
+            if (FVector::DistSquared(Guard->GetActorLocation(), Player->GetActorLocation()) > FMath::Square(NearbyMovementDetectionDistance)) continue;
+            const FAIPlayerAlertState* Existing = FindPlayerAlertState(Player);
+            // Once recognized nearby, stopping does not make a player disappear.
+            if (Player->GetVelocity().SizeSquared2D() <= FMath::Square(20.f) && !(Existing && Existing->bIsConfirmed)) continue;
+            FCanBeSeenFromContext Context;
+            Context.ObserverLocation = Guard->GetPawnViewLocation();
+            Context.IgnoreActor = Guard;
+            FVector SeenLocation;
+            int32 Checks = 0, AsyncChecks = 0;
+            float Strength = 0.f;
+            if (Player->CanBeSeenFrom(Context, SeenLocation, Checks, AsyncChecks, Strength) != UAISense_Sight::EVisibilityResult::Visible) continue;
+            FindOrAddPlayerAlertState(Player);
+            NearbyPlayers.Add(Player);
+        }
+    }
+
     for (int32 Index = PlayerAlertStates.Num() - 1;
          Index >= 0;
          --Index)
     {
         FAIPlayerAlertState& State = PlayerAlertStates[Index];
 
-        if (!IsValid(State.PlayerActor))
+        const ULootCollectorComponent* Loot = IsValid(State.PlayerActor) ? State.PlayerActor->FindComponentByClass<ULootCollectorComponent>() : nullptr;
+        if (!IsValid(State.PlayerActor) || (Loot && Loot->HasEscaped()))
         {
+            if (IsValid(State.PlayerActor)) NotifyPlayerAlertHidden(State.PlayerActor);
             PlayerAlertStates.RemoveAt(Index);
             continue;
         }
 
-        // Confirmed alerts remain confirmed.
-        if (State.bIsConfirmed)
-        {
-            State.Progress = 1.f;
-            continue;
-        }
+        const bool bWasNearby = State.bNearbyMovementSensed;
+        State.bNearbyMovementSensed = NearbyPlayers.Contains(State.PlayerActor);
+        if (bWasNearby && !State.bNearbyMovementSensed && !State.bIsInSight && State.bIsConfirmed)
+            InvestigateAt(State.LastKnownLocation);
 
-        if (State.bIsInSight)
+        const bool bCurrentlySensed = State.bIsInSight || State.bNearbyMovementSensed;
+        const bool bChaseWithoutSensing = !bCurrentlySensed && State.bIsConfirmed && GetWorld()->GetTimeSeconds() < State.ChaseUntil;
+        if (State.bWasChasingWithoutSensing && !bChaseWithoutSensing && !bCurrentlySensed)
+            InvestigateAt(State.LastKnownLocation);
+        State.bWasChasingWithoutSensing = bChaseWithoutSensing;
+
+        if (bChaseWithoutSensing)
         {
-            State.Progress = FMath::Min(
-                1.f,
-                State.Progress +
-                    DeltaTime /
-                    FMath::Max(AlertFillDuration, 0.1f)
-            );
+            // Explicit, bounded chase grace: track the actor for three seconds,
+            // even when they sprint away or crouch out of sight.
+            State.LastKnownLocation = State.PlayerActor->GetActorLocation();
+            State.Progress = 1.f;
+        }
+        else if (bCurrentlySensed)
+        {
+            State.LastKnownLocation = State.PlayerActor->GetActorLocation();
+            const APawn* Guard = GetPawn();
+            const AArenaGameCharacter* Player = Cast<AArenaGameCharacter>(State.PlayerActor);
+            const bool bMovingSprint = Player && Player->IsSprinting() && Player->GetVelocity().SizeSquared2D() > FMath::Square(20.f);
+            const float ConfirmDistance = bMovingSprint ? FMath::Max(InstantDetectionDistance, InstantSprintDetectionDistance) : InstantDetectionDistance;
+            const bool bCloseVisibleTarget = Guard && ConfirmDistance > 0.f &&
+                FVector::DistSquared(Guard->GetActorLocation(), State.LastKnownLocation) <= FMath::Square(ConfirmDistance);
+            State.Progress = (State.bIsConfirmed || bCloseVisibleTarget || State.bNearbyMovementSensed) ? 1.f : FMath::Min(1.f,
+                State.Progress + DeltaTime / FMath::Max(AlertFillDuration, 0.1f));
         }
         else
         {
-            State.Progress = FMath::Max(
-                0.f,
-                State.Progress -
-                    DeltaTime /
-                    FMath::Max(AlertDecayDuration, 0.1f)
-            );
+            const float DecayDuration = State.bIsConfirmed ? AlertSearchDuration : AlertDecayDuration;
+            State.Progress = FMath::Max(0.f, State.Progress - DeltaTime / FMath::Max(DecayDuration, 0.1f));
+            if (State.Progress <= 0.f) State.bIsConfirmed = false;
         }
 
         // Update the affected player's own HUD.
@@ -381,7 +424,7 @@ void AArenaAIController::UpdateAlert(float DeltaTime)
         }
 
         // Confirm alert after reaching 100%.
-        if (State.Progress >= 1.f && State.bIsInSight)
+        if (!State.bIsConfirmed && State.Progress >= 1.f && (State.bIsInSight || State.bNearbyMovementSensed))
         {
             State.bIsConfirmed = true;
 
@@ -393,6 +436,8 @@ void AArenaAIController::UpdateAlert(float DeltaTime)
                 *GetNameSafe(State.PlayerActor)
             );
         }
+        if (State.bIsConfirmed && bCurrentlySensed)
+            State.ChaseUntil = GetWorld()->GetTimeSeconds() + FMath::Max(0.f, LostTargetChaseDuration);
     }
 
     // Select a confirmed target for the existing Behavior Tree.
@@ -404,7 +449,7 @@ void AArenaAIController::UpdateAlert(float DeltaTime)
 
         for (const FAIPlayerAlertState& State : PlayerAlertStates)
         {
-            if (State.bIsConfirmed &&
+            if (State.bIsConfirmed && (State.bIsInSight || State.bNearbyMovementSensed) &&
                 IsValid(State.PlayerActor))
             {
                 ConfirmedTarget = State.PlayerActor;
@@ -412,8 +457,26 @@ void AArenaAIController::UpdateAlert(float DeltaTime)
             }
         }
 
+        // A currently perceived teammate takes priority over a hidden grace target.
+        if (!ConfirmedTarget)
+            for (const FAIPlayerAlertState& State : PlayerAlertStates)
+                if (State.bIsConfirmed && IsValid(State.PlayerActor) && GetWorld()->GetTimeSeconds() < State.ChaseUntil)
+                {
+                    ConfirmedTarget = State.PlayerActor;
+                    break;
+                }
+
+        if (BB->GetValueAsObject(AlertTargetBlackboardKey) &&
+            BB->GetValueAsObject(AlertTargetBlackboardKey) != ConfirmedTarget)
+            ClearFocus(EAIFocusPriority::Gameplay);
+
         if (ConfirmedTarget)
         {
+            if (bInvestigationFocusActive)
+            {
+                ClearFocus(EAIFocusPriority::Gameplay);
+                bInvestigationFocusActive = false;
+            }
             BB->SetValueAsBool(AlertConfirmedKey, true);
             BB->SetValueAsObject(
                 AlertTargetBlackboardKey,
@@ -426,6 +489,23 @@ void AArenaAIController::UpdateAlert(float DeltaTime)
             BB->ClearValue(AlertTargetBlackboardKey);
         }
     }
+    if (BB && InvestigationExpiresAt >= 0.0 && GetWorld()->GetTimeSeconds() >= InvestigationExpiresAt)
+    {
+        BB->ClearValue(InvestigateLocationKey);
+        BB->ClearValue(DamageLocationKey);
+        InvestigationExpiresAt = -1.0;
+    }
+    if (BB && !BB->GetValueAsObject(AlertTargetBlackboardKey) && !BB->IsVectorValueSet(DamageLocationKey) && BB->IsVectorValueSet(InvestigateLocationKey))
+    {
+        SetFocalPoint(BB->GetValueAsVector(InvestigateLocationKey), EAIFocusPriority::Gameplay);
+        bInvestigationFocusActive = true;
+    }
+    else if (bInvestigationFocusActive)
+    {
+        ClearFocus(EAIFocusPriority::Gameplay);
+        bInvestigationFocusActive = false;
+    }
+
 }
 
 
@@ -444,6 +524,7 @@ void AArenaAIController::UpdateAlertTarget(AActor* NewTarget)
         FindOrAddPlayerAlertState(NewTarget);
 
     State.bIsInSight = true;
+    State.LastKnownLocation = NewTarget->GetActorLocation();
 
     // Update immediately so the player sees the indicator.
     NotifyPlayerAlert(NewTarget, State.Progress);
@@ -497,10 +578,11 @@ void AArenaAIController::OnTargetSensed(
     AActor* Actor,
     FAIStimulus Stimulus)
 {
-    if (!Actor)
+    if (!HasAuthority() || !IsValid(Actor))
     {
         return;
     }
+    if (const ULootCollectorComponent* Loot = Actor->FindComponentByClass<ULootCollectorComponent>(); Loot && Loot->HasEscaped()) return;
 
     const TSubclassOf<UAISense> Sense =
         UAIPerceptionSystem::GetSenseClassForStimulus(
@@ -516,12 +598,6 @@ void AArenaAIController::OnTargetSensed(
         if (Stimulus.WasSuccessfullySensed())
         {
             // Only track player-controlled pawns for Alert.
-            APlayerController* PlayerPC =
-                UGameplayStatics::GetPlayerControllerFromID(
-                    this,
-                    0
-                );
-
             bool bIsPlayerPawn = false;
 
             for (FConstPlayerControllerIterator It =
@@ -548,62 +624,40 @@ void AArenaAIController::OnTargetSensed(
             if (FAIPlayerAlertState* State =
                 FindPlayerAlertState(Actor))
             {
+                if (State->bIsInSight) InvestigateAt(State->LastKnownLocation);
                 State->bIsInSight = false;
-
-                // An alert that is not yet confirmed will decay.
-                // A confirmed target remains confirmed.
-                if (BB)
-                {
-                    BB->SetValueAsVector(
-                        InvestigateLocationKey,
-                        Stimulus.StimulusLocation
-                    );
-                }
             }
         }
 
         return;
     }
 
+    // Expired hearing/damage/team stimuli must not restart a search.
+    if (!Stimulus.WasSuccessfullySensed()) return;
+
     // Damage
     if (Sense == UAISense_Damage::StaticClass())
     {
-        if (BB)
-        {
-            BB->SetValueAsVector(
-                DamageLocationKey,
-                Stimulus.StimulusLocation
-            );
-        }
-
+        InvestigateAt(Stimulus.StimulusLocation);
+        if (BB) BB->SetValueAsVector(DamageLocationKey, Stimulus.StimulusLocation);
         return;
     }
 
-    // Hearing
-    if (Sense == UAISense_Hearing::StaticClass())
+    if (Sense == UAISense_Hearing::StaticClass() || Sense == UAISense_Team::StaticClass())
+        InvestigateAt(Stimulus.StimulusLocation);
+}
+
+void AArenaAIController::InvestigateAt(const FVector& Location)
+{
+    if (!HasAuthority()) return;
+    if (UBlackboardComponent* BB = GetBlackboardComponent())
     {
-        if (BB)
+        BB->SetValueAsVector(InvestigateLocationKey, Location);
+        InvestigationExpiresAt = GetWorld()->GetTimeSeconds() + FMath::Max(AlertSearchDuration, 0.1f);
+        if (!BB->GetValueAsObject(AlertTargetBlackboardKey) && !BB->IsVectorValueSet(DamageLocationKey))
         {
-            BB->SetValueAsVector(
-                InvestigateLocationKey,
-                Stimulus.StimulusLocation
-            );
+            SetFocalPoint(Location, EAIFocusPriority::Gameplay);
+            bInvestigationFocusActive = true;
         }
-
-        return;
-    }
-
-    // Team Sense - Lab 11 Step 7
-    if (Sense == UAISense_Team::StaticClass())
-    {
-        if (BB)
-        {
-            BB->SetValueAsVector(
-                InvestigateLocationKey,
-                Stimulus.StimulusLocation
-            );
-        }
-
-        return;
     }
 }

@@ -23,6 +23,11 @@ public class ArenaGame : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[] { "SlateCore", "MediaAssets", "AudioMixer" });
 
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.AddRange(new string[] { "UnrealEd", "AnimGraph", "AnimGraphRuntime", "BlueprintGraph" });
+		}
+
 		PublicIncludePaths.AddRange(new string[] {
 			"ArenaGame",
 			"ArenaGame/Variant_Platforming",

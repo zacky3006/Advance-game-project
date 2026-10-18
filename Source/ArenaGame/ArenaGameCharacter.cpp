@@ -3,6 +3,43 @@
 #include "ArenaGameCharacter.h"
 #include "LootCollectorComponent.h"
 #include "InputCoreTypes.h"
+#include "Components/AudioComponent.h"
+#include "Sound/SoundBase.h"
+#include "Sound/SoundAttenuation.h"
+#include "UObject/ConstructorHelpers.h"
+#include "Engine/World.h"
+#include "Components/CapsuleComponent.h"
+
+UAISense_Sight::EVisibilityResult AArenaGameCharacter::CanBeSeenFrom(const FCanBeSeenFromContext& Context,
+    FVector& OutSeenLocation, int32& OutNumberOfLoSChecksPerformed,
+    int32& OutNumberOfAsyncLosCheckRequested, float& OutSightStrength,
+    int32* UserData, const FOnPendingVisibilityQueryProcessedDelegate* Delegate)
+{
+    OutNumberOfLoSChecksPerformed = 0;
+    OutNumberOfAsyncLosCheckRequested = 0;
+    OutSightStrength = 0.f;
+    OutSeenLocation = GetActorLocation();
+    if (!GetWorld()) return UAISense_Sight::EVisibilityResult::NotVisible;
+    // Capsule-relative samples stay valid on dedicated servers and shrink
+    // when crouching, without depending on offscreen animation bone updates.
+    const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+    const FVector Up = GetActorUpVector();
+    const FVector Samples[] = {GetActorLocation() + Up * HalfHeight * .75f,
+        GetActorLocation() + Up * HalfHeight * .35f, GetActorLocation()};
+    FCollisionQueryParams Query(SCENE_QUERY_STAT(PlayerBodySight), true, Context.IgnoreActor);
+    Query.AddIgnoredActor(this);
+    for (const FVector& Point : Samples)
+    {
+        ++OutNumberOfLoSChecksPerformed;
+        if (!GetWorld()->LineTraceTestByChannel(Context.ObserverLocation, Point, ECC_Visibility, Query))
+        {
+            OutSeenLocation = Point;
+            OutSightStrength = 1.f;
+            return UAISense_Sight::EVisibilityResult::Visible;
+        }
+    }
+    return UAISense_Sight::EVisibilityResult::NotVisible;
+}
 
 
 // =====================================================
@@ -11,7 +48,6 @@
 
 #include "Engine/LocalPlayer.h"
 #include "Camera/CameraComponent.h"
-#include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/SpringArmComponent.h"
@@ -66,11 +102,20 @@
 
 AArenaGameCharacter::AArenaGameCharacter()
 {
+    static ConstructorHelpers::FObjectFinder<USoundBase> LeftStep(TEXT("/Game/Audio/Footsteps/SW_FootstepLeft.SW_FootstepLeft"));
+    static ConstructorHelpers::FObjectFinder<USoundBase> RightStep(TEXT("/Game/Audio/Footsteps/SW_FootstepRight.SW_FootstepRight"));
+    if (LeftStep.Object) FootstepSounds.Add(LeftStep.Object);
+    if (RightStep.Object) FootstepSounds.Add(RightStep.Object);
+    static ConstructorHelpers::FObjectFinder<USoundAttenuation> Attenuation(TEXT("/Game/Audio/Footsteps/SA_Footsteps.SA_Footsteps"));
+    FootstepAttenuation = Attenuation.Object;
+
     // -------------------------------------------------
     // Tick
     // -------------------------------------------------
 
     PrimaryActorTick.bCanEverTick = true;
+    bReplicates = true;
+    SetReplicateMovement(true);
     LootCollector = CreateDefaultSubobject<ULootCollectorComponent>(TEXT("LootCollector"));
 
 
@@ -234,6 +279,34 @@ void AArenaGameCharacter::ToggleCameraPerspective()
         bUseControllerRotationYaw = bSavedUseControllerRotationYaw;
         GetMesh()->SetOwnerNoSee(bSavedMeshOwnerNoSee);
     }
+    ServerSetFirstPersonMovement(bIsFirstPerson);
+
+}
+
+void AArenaGameCharacter::ServerSetFirstPersonMovement_Implementation(bool bEnabled)
+{
+    if (!IsPlayerControlled() || (LootCollector && LootCollector->IsEndingGame()) || bFirstPersonMovement == bEnabled) return;
+    bFirstPersonMovement = bEnabled;
+    OnRep_FirstPersonMovement();
+    ForceNetUpdate();
+}
+
+void AArenaGameCharacter::OnRep_FirstPersonMovement()
+{
+    // The owner already applied the camera and rotation policy without waiting for a round trip.
+    if (IsLocallyControlled()) return;
+    if (bFirstPersonMovement)
+    {
+        bSavedOrientRotationToMovement = GetCharacterMovement()->bOrientRotationToMovement;
+        bSavedUseControllerRotationYaw = bUseControllerRotationYaw;
+        GetCharacterMovement()->bOrientRotationToMovement = false;
+        bUseControllerRotationYaw = true;
+    }
+    else
+    {
+        GetCharacterMovement()->bOrientRotationToMovement = bSavedOrientRotationToMovement;
+        bUseControllerRotationYaw = bSavedUseControllerRotationYaw;
+    }
 }
 
 // =====================================================
@@ -247,6 +320,7 @@ void AArenaGameCharacter::GetLifetimeReplicatedProps(
     Super::GetLifetimeReplicatedProps(
         OutLifetimeProps
     );
+    DOREPLIFETIME(AArenaGameCharacter, bFirstPersonMovement);
 
     DOREPLIFETIME(
         AArenaGameCharacter,
@@ -279,92 +353,48 @@ void AArenaGameCharacter::Tick(
     }
 
 
-    // -------------------------------------------------
-    // AI Hearing is server-side
-    // -------------------------------------------------
-
-    if (!HasAuthority())
+    // The server emits each step once; multicast plays it on every relevant client.
+    if (!HasAuthority()) return;
+    const float Speed = GetVelocity().Size2D();
+    if (!GetCharacterMovement()->IsMovingOnGround() || Speed < 20.f ||
+        (HealthComponent && HealthComponent->IsDead()) || (LootCollector && LootCollector->IsEndingGame()))
     {
+        FootstepTimer = 0.f;
         return;
     }
 
-
-    // -------------------------------------------------
-    // Only player characters create footsteps
-    // -------------------------------------------------
-
-    if (!IsPlayerControlled())
-    {
-        return;
-    }
-
-
-    // -------------------------------------------------
-    // Character must actually be moving
-    // -------------------------------------------------
-
-    if (GetVelocity().SizeSquared() < 1.f)
-    {
-        return;
-    }
-
-
-    // -------------------------------------------------
-    // SNEAK = NO FOOTSTEP SOUND
-    // -------------------------------------------------
-
-    if (bIsSneaking)
-    {
-        return;
-    }
-
-
-    // -------------------------------------------------
-    // Footstep timer
-    // -------------------------------------------------
-
+    const float CadenceScale = FMath::Clamp(FMath::Max(WalkSpeed, 1.f) / Speed, 0.65f, 1.35f);
+    const float Interval = FMath::Max(0.1f, FootstepInterval * CadenceScale);
     FootstepTimer += DeltaSeconds;
+    if (FootstepTimer < Interval) return;
+    FootstepTimer = FMath::Fmod(FootstepTimer, Interval);
 
-    if (FootstepTimer < FootstepInterval)
+    if (!FootstepSounds.IsEmpty())
     {
-        return;
+        bLeftFootstep = !bLeftFootstep;
+        // Array entries are left, right; a single custom clip can serve both feet.
+        const int32 Index = !bLeftFootstep && FootstepSounds.Num() > 1 ? 1 : 0;
+        LastFootstepSoundIndex = Index;
+        const float Volume = FootstepVolume * (bIsSneaking ? 0.18f : bIsSprinting ? 1.25f : 1.f);
+        MulticastPlayFootstep(static_cast<uint8>(Index), bLeftFootstep, Volume, FMath::FRandRange(0.94f, 1.06f));
     }
 
-    FootstepTimer = 0.f;
+    // Audible playback is separate from AI hearing. Preserve silent sneaking and
+    // never report guard footsteps as an investigation stimulus for other guards.
+    if (IsPlayerControlled() && !bIsSneaking)
+        UAISense_Hearing::ReportNoiseEvent(GetWorld(), GetActorLocation(), 1.f, this,
+            bIsSprinting ? SprintFootstepRange : FootstepRange,
+            bIsSprinting ? FName(TEXT("SprintFootstep")) : FName(TEXT("Footstep")));
+}
 
-
-    // -------------------------------------------------
-    // Select noise range
-    // -------------------------------------------------
-
-    const float CurrentFootstepRange =
-        bIsSprinting
-            ? SprintFootstepRange
-            : FootstepRange;
-
-
-    // -------------------------------------------------
-    // Select noise tag
-    // -------------------------------------------------
-
-    const FName NoiseTag =
-        bIsSprinting
-            ? TEXT("SprintFootstep")
-            : TEXT("Footstep");
-
-
-    // -------------------------------------------------
-    // Report noise to AI Hearing
-    // -------------------------------------------------
-
-    UAISense_Hearing::ReportNoiseEvent(
-        GetWorld(),
-        GetActorLocation(),
-        1.f,
-        this,
-        CurrentFootstepRange,
-        NoiseTag
-    );
+void AArenaGameCharacter::MulticastPlayFootstep_Implementation(uint8 SoundIndex, bool bLeft, float Volume, float Pitch)
+{
+    if (GetNetMode() == NM_DedicatedServer || !FootstepSounds.IsValidIndex(SoundIndex) || !FootstepSounds[SoundIndex]) return;
+    const FVector Offset(0.f, bLeft ? -10.f : 10.f, -GetCapsuleComponent()->GetScaledCapsuleHalfHeight() + 6.f);
+    UAudioComponent* Audio = UGameplayStatics::SpawnSoundAttached(FootstepSounds[SoundIndex], GetRootComponent(),
+        NAME_None, Offset, FRotator::ZeroRotator, EAttachLocation::KeepRelativeOffset, true,
+        Volume, Pitch, 0.f, FootstepAttenuation, nullptr, true);
+    if (Audio) Audio->ComponentTags.Add(TEXT("FootstepAudio"));
 }
 
 
@@ -410,28 +440,6 @@ void AArenaGameCharacter::SetupPlayerInputComponent(
     if (!EnhancedInputComponent)
     {
         return;
-    }
-
-
-    // -------------------------------------------------
-    // Jump
-    // -------------------------------------------------
-
-    if (JumpAction)
-    {
-        EnhancedInputComponent->BindAction(
-            JumpAction,
-            ETriggerEvent::Started,
-            this,
-            &AArenaGameCharacter::DoJumpStart
-        );
-
-        EnhancedInputComponent->BindAction(
-            JumpAction,
-            ETriggerEvent::Completed,
-            this,
-            &AArenaGameCharacter::DoJumpEnd
-        );
     }
 
 
@@ -667,6 +675,11 @@ void AArenaGameCharacter::DoLook(
 // DoJumpStart
 // =====================================================
 
+bool AArenaGameCharacter::CanJumpInternal_Implementation() const
+{
+    return false;
+}
+
 void AArenaGameCharacter::DoJumpStart()
 {
     Jump();
@@ -730,6 +743,7 @@ void AArenaGameCharacter::UpdateMovementSpeed()
     {
         Movement->MaxWalkSpeed =
             SneakSpeed;
+        Movement->MaxWalkSpeedCrouched = SneakSpeed;
     }
     else if (bIsSprinting)
     {
@@ -931,6 +945,7 @@ bool AArenaGameCharacter::ServerSetSneakState_Validate(
 
 void AArenaGameCharacter::ServerMeleeAttack_Implementation()
 {
+    if (LootCollector && LootCollector->IsEndingGame()) return;
     if (!HasAuthority())
     {
         return;
@@ -1152,6 +1167,7 @@ bool AArenaGameCharacter::ServerMeleeAttack_Validate()
 
 void AArenaGameCharacter::ServerHeal_Implementation()
 {
+    if (LootCollector && LootCollector->IsEndingGame()) return;
     if (!HasAuthority())
     {
         return;
@@ -1197,6 +1213,7 @@ float AArenaGameCharacter::TakeDamage(
     AActor* DamageCauser
 )
 {
+    if (LootCollector && LootCollector->IsEndingGame()) return 0.f;
     // Damage must be processed on Server.
     if (!HasAuthority())
     {
@@ -1220,6 +1237,10 @@ float AArenaGameCharacter::TakeDamage(
     // -------------------------------------------------
     // Super
     // -------------------------------------------------
+
+    // AI hits are lethal to players, including Blueprint health overrides.
+    if (DamageAmount > 0.f && IsPlayerControlled() && EventInstigator && !EventInstigator->IsPlayerController())
+        DamageAmount = FMath::Max(DamageAmount, HealthComponent->Health);
 
     const float Applied =
         Super::TakeDamage(

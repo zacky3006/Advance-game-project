@@ -33,6 +33,8 @@ class ARENAGAME_API UMainMenuWidget : public UUserWidget
 public:
     UMainMenuWidget(const FObjectInitializer& ObjectInitializer);
     void FocusPlayButton();
+    void BeginTeamIntro();
+    void UpdateIntroVotes(int32 Votes, int32 Members, bool bVoted);
 
 protected:
     virtual void NativeOnInitialized() override;
@@ -80,6 +82,9 @@ private:
     TObjectPtr<UBorder> IntroScreen;
     UPROPERTY(Transient)
     TObjectPtr<UBorder> IntroFade;
+    UPROPERTY(Transient)
+    TObjectPtr<UTextBlock> SkipLabel;
+    bool bHasSkipVote = false;
     bool bIntroActive = false;
     bool bIntroFinished = false;
     float IntroWait = 0.f;

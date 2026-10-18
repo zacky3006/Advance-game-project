@@ -21,7 +21,7 @@ public:
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Escape")
     TObjectPtr<UStaticMeshComponent> Mesh;
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Escape", meta=(ClampMin="0"))
-    int32 RequiredValue = 1000;
+    int32 RequiredValue = 10000;
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Escape", meta=(ClampMin="1", Units="cm"))
     float InteractionRange = 200.f;
     /** Relative to Content/Movies. Missing movie returns to the menu after fading. */

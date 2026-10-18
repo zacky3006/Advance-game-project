@@ -3,11 +3,15 @@
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "UObject/ConstructorHelpers.h"
+#include "Net/UnrealNetwork.h"
 
 ALootPickup::ALootPickup()
 {
     bReplicates = true;
+    bAlwaysRelevant = true;
+    SetReplicateMovement(true);
     Mesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Mesh"));
+    Mesh->SetIsReplicated(true);
     SetRootComponent(Mesh);
     Mesh->SetCollisionProfileName(TEXT("BlockAllDynamic"));
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube.Cube"));
@@ -29,4 +33,12 @@ bool ALootPickup::TryCollect(ULootCollectorComponent* Collector)
     Collector->RecordPickup(this);
     Destroy();
     return true;
+}
+
+void ALootPickup::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+    DOREPLIFETIME(ALootPickup, ItemName);
+    DOREPLIFETIME(ALootPickup, Value);
+    DOREPLIFETIME(ALootPickup, ItemIcon);
 }

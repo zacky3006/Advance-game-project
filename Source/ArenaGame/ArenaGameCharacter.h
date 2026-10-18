@@ -6,6 +6,7 @@
 #include "GameFramework/Character.h"
 #include "Logging/LogMacros.h"
 #include "GenericTeamAgentInterface.h"
+#include "Perception/AISightTargetInterface.h"
 #include "ArenaGameCharacter.generated.h"
 
 class USpringArmComponent;
@@ -14,6 +15,8 @@ class UInputAction;
 class UHealthComponent;
 class USphereComponent;
 class ULootCollectorComponent;
+class USoundBase;
+class USoundAttenuation;
 
 struct FInputActionValue;
 
@@ -21,7 +24,8 @@ struct FInputActionValue;
 UCLASS(abstract)
 class ARENAGAME_API AArenaGameCharacter
     : public ACharacter,
-      public IGenericTeamAgentInterface
+      public IGenericTeamAgentInterface,
+      public IAISightTargetInterface
 {
     GENERATED_BODY()
 
@@ -53,6 +57,14 @@ protected:
 
     UPROPERTY(BlueprintReadOnly, Transient, Category="Camera")
     bool bIsFirstPerson = false;
+
+    // Camera selection stays local; movement rotation policy must agree on the server.
+    UPROPERTY(ReplicatedUsing=OnRep_FirstPersonMovement)
+    bool bFirstPersonMovement = false;
+    UFUNCTION(Server, Reliable)
+    void ServerSetFirstPersonMovement(bool bEnabled);
+    UFUNCTION()
+    void OnRep_FirstPersonMovement();
 
     bool bSavedOrientRotationToMovement = true;
     bool bSavedUseControllerRotationYaw = false;
@@ -178,6 +190,19 @@ protected:
      * Runtime timer used to generate footsteps.
      */
     float FootstepTimer = 0.f;
+    int32 LastFootstepSoundIndex = INDEX_NONE;
+    bool bLeftFootstep = false;
+
+    // Index 0 = left foot, index 1 = right foot.
+    UPROPERTY(EditDefaultsOnly, Category="Audio|Footsteps")
+    TArray<TObjectPtr<USoundBase>> FootstepSounds;
+    UPROPERTY(EditDefaultsOnly, Category="Audio|Footsteps")
+    TObjectPtr<USoundAttenuation> FootstepAttenuation;
+    UPROPERTY(EditDefaultsOnly, Category="Audio|Footsteps", meta=(ClampMin="0.0"))
+    float FootstepVolume = 0.75f;
+
+    UFUNCTION(NetMulticast, Unreliable)
+    void MulticastPlayFootstep(uint8 SoundIndex, bool bLeft, float Volume, float Pitch);
 
 
     // =====================================================
@@ -312,6 +337,8 @@ protected:
     // Input Binding
     // =====================================================
 
+    virtual bool CanJumpInternal_Implementation() const override;
+
     virtual void SetupPlayerInputComponent(
         class UInputComponent* PlayerInputComponent
     ) override;
@@ -354,6 +381,13 @@ public:
     // =====================================================
     // Input Helpers
     // =====================================================
+
+    bool IsSprinting() const { return bIsSprinting; }
+
+    virtual UAISense_Sight::EVisibilityResult CanBeSeenFrom(const FCanBeSeenFromContext& Context,
+        FVector& OutSeenLocation, int32& OutNumberOfLoSChecksPerformed,
+        int32& OutNumberOfAsyncLosCheckRequested, float& OutSightStrength,
+        int32* UserData = nullptr, const FOnPendingVisibilityQueryProcessedDelegate* Delegate = nullptr) override;
 
     UFUNCTION(BlueprintCallable, Category = "Input")
     virtual void DoMove(

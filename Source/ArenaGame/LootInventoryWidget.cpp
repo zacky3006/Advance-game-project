@@ -98,7 +98,7 @@ void ULootInventoryWidget::NativeOnInitialized()
     UHorizontalBox* Header = WidgetTree->ConstructWidget<UHorizontalBox>();
     Content->AddChildToVerticalBox(Header)->SetPadding(FMargin(0.f, 0.f, 0.f, 18.f));
     UVerticalBox* Titles = WidgetTree->ConstructWidget<UVerticalBox>();
-    Titles->AddChildToVerticalBox(Text(WidgetTree, NSLOCTEXT("Loot", "InventoryTitle", "YOUR HAUL"), 30, Gold));
+    Titles->AddChildToVerticalBox(Text(WidgetTree, NSLOCTEXT("Loot", "TeamInventoryTitle", "TEAM HAUL"), 30, Gold));
     Titles->AddChildToVerticalBox(Text(WidgetTree, NSLOCTEXT("Loot", "InventorySubtitle", "Every valuable. Every successful steal."), 13, Muted));
     Header->AddChildToHorizontalBox(Titles)->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
     UButton* Close = WidgetTree->ConstructWidget<UButton>();

@@ -28,14 +28,22 @@ struct FAIPlayerAlertState
     UPROPERTY()
     bool bIsInSight = false;
 
+    bool bNearbyMovementSensed = false;
+    double ChaseUntil = -1.0;
+    bool bWasChasingWithoutSensing = false;
+
     UPROPERTY()
     bool bIsConfirmed = false;
+
+    UPROPERTY()
+    FVector LastKnownLocation = FVector::ZeroVector;
 };
 
 UCLASS()
 class ARENAGAME_API AArenaAIController : public AAIController
 {
     GENERATED_BODY()
+    friend class UCoopPIETestLibrary;
 
 public:
     AArenaAIController();
@@ -94,6 +102,24 @@ protected:
         meta = (ClampMin = "0.1"))
     float AlertDecayDuration = 2.0f;
 
+    // Unreal units are centimeters. Zero disables instant close-range confirmation.
+    UPROPERTY(EditDefaultsOnly, Category = "AI Alert", meta = (ClampMin = "0.0", Units = "cm"))
+    float InstantDetectionDistance = 400.0f;
+
+    // Moving sprinters are recognized farther away; sight is still required.
+    UPROPERTY(EditDefaultsOnly, Category = "AI Alert", meta = (ClampMin = "0.0", Units = "cm"))
+    float InstantSprintDetectionDistance = 700.0f;
+
+    UPROPERTY(EditDefaultsOnly, Category = "AI Alert", meta = (ClampMin = "0.0", Units = "cm"))
+    float NearbyMovementDetectionDistance = 200.0f;
+
+    UPROPERTY(EditDefaultsOnly, Category = "AI Alert", meta = (ClampMin = "0.0", Units = "s"))
+    float LostTargetChaseDuration = 3.0f;
+
+    // Time spent searching after a confirmed player is lost. New sounds refresh the search.
+    UPROPERTY(EditDefaultsOnly, Category = "AI Alert", meta = (ClampMin = "0.1"))
+    float AlertSearchDuration = 6.0f;
+
     // Alert state tracked separately for each player
     UPROPERTY()
     TArray<FAIPlayerAlertState> PlayerAlertStates;
@@ -107,6 +133,9 @@ protected:
 
 private:
     void UpdateAlert(float DeltaTime);
+    void InvestigateAt(const FVector& Location);
+    double InvestigationExpiresAt = -1.0;
+    bool bInvestigationFocusActive = false;
 
     FAIPlayerAlertState* FindPlayerAlertState(AActor* PlayerActor);
 

@@ -54,7 +54,7 @@ bool AEscapePoint::HasEnoughLoot(const ULootCollectorComponent* Collector) const
 bool AEscapePoint::CanInteract(const ULootCollectorComponent* Collector) const
 {
     const APawn* Pawn = Collector ? Cast<APawn>(Collector->GetOwner()) : nullptr;
-    if (!Pawn || !Pawn->IsPlayerControlled()) return false;
+    if (!Pawn || !Pawn->IsPlayerControlled() || Collector->IsEndingGame()) return false;
     const UHealthComponent* Health = Pawn->FindComponentByClass<UHealthComponent>();
     if (Health && Health->IsDead()) return false;
     if (FVector::DistSquared(Pawn->GetActorLocation(), GetActorLocation()) > FMath::Square(FMath::Max(1.f, InteractionRange))) return false;

@@ -18,17 +18,18 @@ public:
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Loot")
     TObjectPtr<UStaticMeshComponent> Mesh;
 
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loot")
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Replicated, Category="Loot")
     FText ItemName = NSLOCTEXT("Loot", "DefaultItem", "Valuable");
 
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loot", meta=(ClampMin="0"))
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Replicated, Category="Loot", meta=(ClampMin="0"))
     int32 Value = 100;
 
     /** Fallback artwork only when no static mesh is available; mesh previews take priority. */
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loot")
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Replicated, Category="Loot")
     TObjectPtr<UTexture2D> ItemIcon;
 
     bool TryCollect(ULootCollectorComponent* Collector);
+    virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 private:
     bool bCollected = false;

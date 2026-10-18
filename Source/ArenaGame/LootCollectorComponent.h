@@ -67,7 +67,11 @@ public:
 
     UFUNCTION(BlueprintCallable, Category="Escape")
     void TryEscape();
-    bool IsEndingGame() const { return bEndingGame; }
+    bool IsEndingGame() const { return bEndingGame || bEscaped; }
+    UFUNCTION(BlueprintPure, Category="Team")
+    bool HasEscaped() const { return bEscaped; }
+    void MarkExtracted();
+    void PrepareTeamEnding();
 
     UFUNCTION(BlueprintCallable, Category="Loot")
     void ToggleInventory();
@@ -88,6 +92,12 @@ protected:
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+    friend class UCoopPIETestLibrary;
+    UPROPERTY(ReplicatedUsing=OnRep_Escaped)
+    bool bEscaped = false;
+    UFUNCTION()
+    void OnRep_Escaped();
+    void SyncTeamInventory();
     UFUNCTION(Server, Reliable)
     void ServerEscape(AEscapePoint* Point);
     UFUNCTION(Client, Reliable)

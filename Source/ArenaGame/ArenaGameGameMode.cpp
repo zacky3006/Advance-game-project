@@ -10,10 +10,30 @@
 #include "GameFramework/Pawn.h"
 #include "BrainComponent.h"
 #include "TimerManager.h"
+#include "ArenaGamePlayerController.h"
 
 
 AArenaGameGameMode::AArenaGameGameMode()
 {
+    GameStateClass = AArenaGameState::StaticClass();
+    PlayerStateClass = AArenaPlayerState::StaticClass();
+    PlayerControllerClass = AArenaGamePlayerController::StaticClass();
+}
+
+void AArenaGameGameMode::PreLogin(const FString& Options, const FString& Address, const FUniqueNetIdRepl& UniqueId, FString& ErrorMessage)
+{
+    Super::PreLogin(Options, Address, UniqueId, ErrorMessage);
+    if (!ErrorMessage.IsEmpty()) return;
+    const AArenaGameState* Team = GetGameState<AArenaGameState>();
+    if (GetNumPlayers() >= 2) ErrorMessage = TEXT("The two-player team is full.");
+    else if (Team && (!Team->EscapedPlayers.IsEmpty() || !Team->DeadPlayers.IsEmpty() || Team->bTeamComplete)) ErrorMessage = TEXT("This team has already started extracting.");
+}
+
+void AArenaGameGameMode::Logout(AController* Exiting)
+{
+    if (AArenaGameState* Team = GetGameState<AArenaGameState>())
+        Team->PlayerDisconnected(Cast<APlayerController>(Exiting));
+    Super::Logout(Exiting);
 }
 
 
@@ -51,31 +71,16 @@ void AArenaGameGameMode::OnCharacterKilled(
         }
     }
 
-    // ==========================================
-    // LAB 12 - Player death ends the round
-    // ==========================================
-    AArenaGameState* GS = GetGameState<AArenaGameState>();
-
-    const bool bRoundStillRunning =
-        (GS == nullptr || !GS->bRoundOver);
-
-    if (bRoundStillRunning && Victim)
+    if (Victim && Victim->IsPlayerController())
     {
-        // If the victim is a player, the AI wins.
-        if (Victim->IsPlayerController())
+        if (AArenaGameState* Team = GetGameState<AArenaGameState>())
         {
-            if (GS)
+            Team->PlayerDied(Cast<APlayerController>(Victim));
+            if (Team->bTeamFailed)
             {
-                GS->WinnerId = -1;
-                GS->bRoundOver = true;
-                GS->OnRep_RoundOver();
+                StopAllAI();
+                GetWorldTimerManager().ClearTimer(WaveTimerHandle);
             }
-
-            // Stop all AI immediately.
-            StopAllAI();
-
-            // Stop the wave timer.
-            GetWorldTimerManager().ClearTimer(WaveTimerHandle);
         }
     }
 }
@@ -83,6 +88,8 @@ void AArenaGameGameMode::OnCharacterKilled(
 
 void AArenaGameGameMode::CheckWinner(AArenaPlayerState* Scorer)
 {
+    // Network heists finish through team extraction, not the legacy kill score.
+    if (GetNetMode() != NM_Standalone) return;
     if (!HasAuthority() || !Scorer)
     {
         return;

@@ -29,7 +29,8 @@ else:
     if placement is None:
         raise RuntimeError('No clear escape placement near player; no map changes made')
     point = actors.spawn_actor_from_class(unreal.EscapePoint, placement)
-    point.set_actor_label('Escape Point - $1000 - E')
+    point.set_editor_property('required_value', 10000)
+    point.set_actor_label('Escape Point - $10000 - E')
     if not level.save_current_level():
         raise RuntimeError('Could not save DemoMap')
     print('Placed escape point:', point.get_actor_location())

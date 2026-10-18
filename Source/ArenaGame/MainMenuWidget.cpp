@@ -1,4 +1,5 @@
 #include "MainMenuWidget.h"
+#include "MainMenuGameMode.h"
 #include "LootUITheme.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/Border.h"
@@ -81,7 +82,7 @@ void UMainMenuWidget::NativeOnInitialized()
     ContentSlot->SetSize(FVector2D(860.f, 480.f));
     UVerticalBox* Content = WidgetTree->ConstructWidget<UVerticalBox>();
     ContentPanel->SetContent(Content);
-    UTextBlock* Title = MenuText(WidgetTree, NSLOCTEXT("Menu", "Title", "PLACEHOLDER"), 76, FLinearColor::White);
+    UTextBlock* Title = MenuText(WidgetTree, NSLOCTEXT("Menu", "Title", "DIRTY WORK"), 76, FLinearColor::White);
     FSlateFontInfo TitleFont = Title->GetFont();
     TitleFont.LetterSpacing = 100;
     Title->SetFont(TitleFont);
@@ -151,12 +152,13 @@ void UMainMenuWidget::NativeOnInitialized()
     IntroImage = WidgetTree->ConstructWidget<UImage>();
     VideoFit->SetContent(IntroImage);
     UTextBlock* Skip = MenuText(WidgetTree, NSLOCTEXT("Menu", "SkipIntro", "SPACE  /  SKIP"), 12, FLinearColor(0.4f, 0.4f, 0.4f));
+    SkipLabel = Skip;
     Skip->SetJustification(ETextJustify::Right);
     UCanvasPanelSlot* SkipSlot = IntroCanvas->AddChildToCanvas(Skip);
     SkipSlot->SetAnchors(FAnchors(1.f, 1.f));
     SkipSlot->SetAlignment(FVector2D(1.f, 1.f));
     SkipSlot->SetPosition(FVector2D(-40.f, -24.f));
-    SkipSlot->SetSize(FVector2D(180.f, 24.f));
+    SkipSlot->SetSize(FVector2D(420.f, 24.f));
     IntroScreen->SetVisibility(ESlateVisibility::Collapsed);
 
     IntroFade = WidgetTree->ConstructWidget<UBorder>();
@@ -334,10 +336,10 @@ int32 UMainMenuBackdropWidget::NativePaint(const FPaintArgs& Args, const FGeomet
 }
 FReply UMainMenuWidget::NativeOnPreviewKeyDown(const FGeometry& Geometry, const FKeyEvent& Event)
 {
-    if (bIntroActive)
+    if (bIntroActive || bIntroFinished)
     {
-        if (Event.GetKey() == EKeys::SpaceBar && !Event.IsRepeat() && IntroWait > 0.4f)
-            FinishIntro();
+        if (Event.GetKey() == EKeys::SpaceBar && !Event.IsRepeat() && !bHasSkipVote && IntroWait > 0.4f)
+            if (AMainMenuPlayerController* PC = Cast<AMainMenuPlayerController>(GetOwningPlayer())) PC->ServerVoteSkipIntro();
         return FReply::Handled();
     }
     if (bStartingGame) return FReply::Handled();
@@ -370,6 +372,12 @@ void UMainMenuWidget::PlayClicked()
         Status->SetVisibility(ESlateVisibility::HitTestInvisible);
         return;
     }
+    if (AMainMenuPlayerController* PC = Cast<AMainMenuPlayerController>(GetOwningPlayer())) PC->ServerRequestTeamGame();
+}
+
+void UMainMenuWidget::BeginTeamIntro()
+{
+    if (bStartingGame) return;
     bStartingGame = true;
     PlayButton->SetIsEnabled(false);
     QuitButton->SetIsEnabled(false);
@@ -472,18 +480,15 @@ void UMainMenuWidget::FinishIntro()
     if (bIntroFinished) return;
     bIntroFinished = true;
     StopIntro();
-    GetWorld()->GetTimerManager().SetTimer(TravelTimer, this, &UMainMenuWidget::OpenDemoMap, 0.15f, false);
+    IntroScreen->SetVisibility(ESlateVisibility::Visible);
+    IntroImage->SetVisibility(ESlateVisibility::Hidden);
+    if (SkipLabel) SkipLabel->SetText(NSLOCTEXT("Menu", "WaitIntro", "WAITING FOR TEAMMATES..."));
+    OpenDemoMap();
 }
 
 void UMainMenuWidget::OpenDemoMap()
 {
-    if (APlayerController* PC = GetOwningPlayer())
-    {
-        PC->bShowMouseCursor = false;
-        PC->SetInputMode(FInputModeGameOnly());
-    }
-    UGameplayStatics::OpenLevel(this, DemoMap, true,
-        TEXT("game=/Game/_AGD/BP_ArenaGameMode.BP_ArenaGameMode_C"));
+    if (AMainMenuPlayerController* PC = Cast<AMainMenuPlayerController>(GetOwningPlayer())) PC->ServerIntroFinished();
 }
 
 void UMainMenuWidget::QuitClicked()
@@ -497,4 +502,11 @@ void UMainMenuWidget::NativeDestruct()
     StopIntro();
     if (GetWorld()) GetWorld()->GetTimerManager().ClearTimer(TravelTimer);
     Super::NativeDestruct();
+}
+
+void UMainMenuWidget::UpdateIntroVotes(int32 Votes, int32 Members, bool bVoted)
+{
+    bHasSkipVote = bVoted;
+    if (SkipLabel && !bIntroFinished)
+        SkipLabel->SetText(FText::FromString(FString::Printf(TEXT("%s  %d/%d"), bVoted ? TEXT("SKIP VOTED") : TEXT("SPACE  /  VOTE TO SKIP"), Votes, Members)));
 }

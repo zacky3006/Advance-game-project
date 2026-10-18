@@ -20,6 +20,7 @@ protected:
     virtual void NativeOnInitialized() override;
     virtual void NativeTick(const FGeometry& Geometry, float DeltaTime) override;
 private:
+    friend class UCoopPIETestLibrary;
     UFUNCTION()
     void FinishClicked();
     UPROPERTY(Transient) TObjectPtr<UVerticalBox> Rows;

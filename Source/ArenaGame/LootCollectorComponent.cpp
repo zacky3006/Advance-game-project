@@ -5,6 +5,10 @@
 #include "LootUITheme.h"
 #include "EscapePoint.h"
 #include "EscapeSequenceWidget.h"
+#include "ArenaGameState.h"
+#include "Components/CapsuleComponent.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "EngineUtils.h"
 #include "HealthComponent.h"
 #include "Blueprint/UserWidget.h"
@@ -41,6 +45,8 @@ ULootCollectorComponent::ULootCollectorComponent()
 
 int64 ULootCollectorComponent::GetTotalValue() const
 {
+    if (const AArenaGameState* Team = GetWorld() ? GetWorld()->GetGameState<AArenaGameState>() : nullptr)
+        return Team->GetTeamTotalValue();
     int64 Total = 0;
     for (const FLootEntry& Entry : Inventory)
     {
@@ -51,7 +57,8 @@ int64 ULootCollectorComponent::GetTotalValue() const
 
 bool ULootCollectorComponent::CanCollect(const ALootPickup* Pickup) const
 {
-    if (bEndingGame) return false;
+    if (IsEndingGame()) return false;
+    if (const AArenaGameState* Team = GetWorld()->GetGameState<AArenaGameState>(); Team && Team->bTeamFailed) return false;
     const APawn* Pawn = Cast<APawn>(GetOwner());
     if (!Pawn || !Pawn->IsPlayerControlled() || !IsValid(Pickup) || Pickup->IsActorBeingDestroyed())
     {
@@ -154,7 +161,7 @@ void ULootCollectorComponent::UpdateFocusedPickup()
 
 void ULootCollectorComponent::TryInteract()
 {
-    if (bEndingGame || IsInventoryOpen()) return;
+    if (IsEndingGame() || IsInventoryOpen()) return;
     const APawn* Pawn = Cast<APawn>(GetOwner());
     if (Pawn && Pawn->IsLocallyControlled())
     {
@@ -169,7 +176,7 @@ void ULootCollectorComponent::TryInteract()
 void ULootCollectorComponent::TryEscape()
 {
     const APawn* Pawn = Cast<APawn>(GetOwner());
-    if (!Pawn || !Pawn->IsLocallyControlled() || bEndingGame || IsInventoryOpen()) return;
+    if (!Pawn || !Pawn->IsLocallyControlled() || IsEndingGame() || IsInventoryOpen()) return;
     AEscapePoint* Best = nullptr;
     double BestDistance = TNumericLimits<double>::Max();
     for (TActorIterator<AEscapePoint> It(GetWorld()); It; ++It)
@@ -187,7 +194,12 @@ void ULootCollectorComponent::TryEscape()
 void ULootCollectorComponent::ServerEscape_Implementation(AEscapePoint* Point)
 {
     // Recheck the authoritative inventory, reach, health and line of sight.
-    if (bEndingGame || !IsValid(Point) || !Point->CanInteract(this) || !Point->HasEnoughLoot(this)) return;
+    if (IsEndingGame() || !IsValid(Point) || !Point->CanInteract(this) || !Point->HasEnoughLoot(this)) return;
+    if (AArenaGameState* Team = GetWorld()->GetGameState<AArenaGameState>())
+    {
+        Team->ExtractPlayer(this, Point->EndingMovie);
+        return;
+    }
     bEndingGame = true;
     ClientBeginEscape(Point->EndingMovie);
 }
@@ -219,10 +231,16 @@ void ULootCollectorComponent::ServerCollect_Implementation(ALootPickup* Pickup)
 
 void ULootCollectorComponent::RecordLoot(const FText& Name, int32 Value)
 {
-    if (!GetOwner()->HasAuthority()) return;
+    if (!GetOwner()->HasAuthority() || IsEndingGame()) return;
     FLootEntry Entry;
     Entry.ItemName = Name;
     Entry.Value = FMath::Max(0, Value);
+    if (AArenaGameState* Team = GetWorld()->GetGameState<AArenaGameState>())
+    {
+        Team->AddTeamLoot(Entry);
+        SyncTeamInventory();
+        return;
+    }
     Inventory.Add(Entry);
     OnInventoryChanged.Broadcast();
     GetOwner()->ForceNetUpdate();
@@ -237,6 +255,12 @@ void ULootCollectorComponent::RecordPickup(const ALootPickup* Pickup)
     Entry.Icon = Pickup->ItemIcon;
     Entry.PreviewMesh = Pickup->Mesh->GetStaticMesh();
     Entry.PreviewMaterials = Pickup->Mesh->GetMaterials();
+    if (AArenaGameState* Team = GetWorld()->GetGameState<AArenaGameState>())
+    {
+        Team->AddTeamLoot(Entry);
+        SyncTeamInventory();
+        return;
+    }
     Inventory.Add(MoveTemp(Entry));
     OnInventoryChanged.Broadcast();
     if (IsInventoryOpen()) InventoryWidget->RefreshInventory();
@@ -250,7 +274,7 @@ bool ULootCollectorComponent::IsInventoryOpen() const
 
 void ULootCollectorComponent::ToggleInventory()
 {
-    if (bEndingGame) return;
+    if (IsEndingGame()) return;
     APawn* Pawn = Cast<APawn>(GetOwner());
     APlayerController* PC = Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
     if (!PC || !PC->IsLocalPlayerController()) return;
@@ -308,11 +332,20 @@ void ULootCollectorComponent::GetLifetimeReplicatedProps(TArray<FLifetimePropert
 {
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
     DOREPLIFETIME_CONDITION(ULootCollectorComponent, Inventory, COND_OwnerOnly);
+    DOREPLIFETIME(ULootCollectorComponent, bEscaped);
 }
 
 void ULootCollectorComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+    SyncTeamInventory();
+    if (IsEndingGame())
+    {
+        CloseInventory();
+        if (HUD) HUD->SetVisibility(ESlateVisibility::Collapsed);
+        if (OutlineMesh) OutlineMesh->SetVisibility(false);
+        return;
+    }
     const APawn* Pawn = Cast<APawn>(GetOwner());
     if (Pawn && Pawn->IsLocallyControlled())
     {
@@ -327,6 +360,47 @@ void ULootCollectorComponent::TickComponent(float DeltaTime, ELevelTick TickType
         if (OutlineMesh) OutlineMesh->SetVisibility(false);
         if (HUD) HUD->SetVisibility(ESlateVisibility::Collapsed);
     }
+}
+
+void ULootCollectorComponent::SyncTeamInventory()
+{
+    const APawn* Pawn = Cast<APawn>(GetOwner());
+    if (!Pawn || !Pawn->GetPlayerState()) return;
+    const AArenaGameState* Team = GetWorld()->GetGameState<AArenaGameState>();
+    if (!Team || Team->TeamInventory.Num() == Inventory.Num()) return;
+    Inventory = Team->TeamInventory;
+    OnRep_Inventory();
+}
+
+void ULootCollectorComponent::MarkExtracted()
+{
+    if (!GetOwner()->HasAuthority() || bEscaped) return;
+    bEscaped = true;
+    GetOwner()->SetCanBeDamaged(false);
+    OnRep_Escaped();
+    GetOwner()->ForceNetUpdate();
+}
+
+void ULootCollectorComponent::OnRep_Escaped()
+{
+    if (!bEscaped) return;
+    GetOwner()->SetActorHiddenInGame(true);
+    GetOwner()->SetActorEnableCollision(false);
+    if (ACharacter* Character = Cast<ACharacter>(GetOwner()))
+    {
+        Character->GetCharacterMovement()->StopMovementImmediately();
+        Character->GetCharacterMovement()->DisableMovement();
+    }
+    CloseInventory();
+    if (HUD) HUD->SetVisibility(ESlateVisibility::Collapsed);
+    if (OutlineMesh) OutlineMesh->SetVisibility(false);
+}
+
+void ULootCollectorComponent::PrepareTeamEnding()
+{
+    bEndingGame = true;
+    CloseInventory();
+    if (HUD) HUD->SetVisibility(ESlateVisibility::Collapsed);
 }
 
 void ULootCollectorComponent::UpdateHUD()
@@ -353,7 +427,7 @@ void ULootCollectorComponent::UpdateHUD()
         UVerticalBox* PanelContents = HUD->WidgetTree->ConstructWidget<UVerticalBox>();
         LootPanel->SetContent(PanelContents);
         UTextBlock* Heading = HUD->WidgetTree->ConstructWidget<UTextBlock>();
-        Heading->SetText(NSLOCTEXT("Loot", "InventoryTitle", "YOUR HAUL"));
+        Heading->SetText(NSLOCTEXT("Loot", "TeamInventoryTitle", "TEAM HAUL"));
         Heading->SetFont(FCoreStyle::GetDefaultFontStyle("Bold", 12));
         Heading->SetColorAndOpacity(FSlateColor(LootUITheme::Gold));
         PanelContents->AddChildToVerticalBox(Heading)->SetPadding(FMargin(0.f, 0.f, 0.f, 10.f));
